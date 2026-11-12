@@ -73,6 +73,8 @@ def main():
     parser.add_argument("--gpu", help="CUDA device index or UUID, default respects CUDA_VISIBLE_DEVICES")
     parser.add_argument("--schedule-dir", type=Path, help="trusted directory containing the 50-step table and cached_schedules")
     parser.add_argument("--triton-cache", type=Path, help="reusable Triton cache directory, default under --out")
+    parser.add_argument("--se3-exact", action="store_true", help="use the experimental FP32 SE(3) node and basis kernels")
+    parser.add_argument("--reuse-ca-rbf", action="store_true", help="reuse the FP32 C-alpha distance features within a block")
     args = parser.parse_args()
 
     if args.designs < 1 or not 0 <= args.seed <= args.seed + args.designs - 1 < 2**32:
@@ -115,7 +117,12 @@ def main():
     pythonpath = [str(REPO / "src"), str(REPO / "include/SE3Transformer"), str(PLUGINS)]
     if env.get("PYTHONPATH"):
         pythonpath.append(env["PYTHONPATH"])
-    env.update(FLAGS)
+    flags = FLAGS.copy()
+    if args.se3_exact:
+        flags["NABLOOP_RFD_SE3_EXACT"] = "1"
+    if args.reuse_ca_rbf:
+        flags["NABLOOP_RFD_LEVERS"] += ",ca-rbf"
+    env.update(flags)
     env.update(
         PYTHONPATH=os.pathsep.join(pythonpath), PYTHONUNBUFFERED="1", PYTHONDONTWRITEBYTECODE="1",
         RFANTIBODY_ROOT=str(work), RFANTIBODY_WEIGHTS=str(args.weights.parent),
@@ -153,7 +160,7 @@ def main():
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         parser.exit(1, f"RFdiffusion output verification failed ({error}). See {log}\n")
     (out / "summary.json").write_text(json.dumps({
-        "flags": FLAGS, "argv": command, "cuda_visible_devices": env.get("CUDA_VISIBLE_DEVICES"),
+        "flags": flags, "argv": command, "cuda_visible_devices": env.get("CUDA_VISIBLE_DEVICES"),
         "wall_seconds": wall, "designs": args.designs, "metadata": completion,
     }, indent=2) + "\n")
     print(f"Generated {args.designs} backbone(s) in {wall:.2f}s. Output: {result}")

@@ -22,4 +22,11 @@ The launcher writes `result.qv`, `run.log`, `metadata.jsonl`, `summary.json`, an
 
 Use `python uplifting/run_exact.py --help` for argument details. The upstream `scripts/rfdiffusion_inference.py` also remains available. The P4 launcher installs the axial packing and SE(3) basis optimizations and isolates the Triton cache RNG before running that script.
 
+The `opt/long-2x` branch adds two optional settings to the same launcher.
+
+- `--se3-exact` packs node features before expanding them onto edges, reuses self-interaction at each destination, and uses a four-term FP32 Triton projection for the measured full SE(3) chunks. The node and projection invocation counts appear in `summary.json`.
+- `--reuse-ca-rbf` reuses the Cα distance features between the pair update and structure update in each eligible inference block.
+
+The SE(3) experiment on an RTX 4090 D took 418.48 seconds for one backbone on the frozen 893-residue target at 50 steps. The same card took 645.96 seconds with the pinned original and 507.31 seconds with P4. The normalized Quiver matched the original. These are single observations. Use a same-card comparison for a different checkpoint, input, or GPU.
+
 The `baseline/upstream` branch points to the pristine upstream commit. The `opt/exact` branch contains the source changes and this launcher. The [P4 benchmark summary](benchmarks/p4-summary.json) records input sizes, wall times, and the scope of the comparison. Use `python uplifting/compare_exact.py --help` to compare artifacts after running both versions on the same GPU with the same inputs and settings.

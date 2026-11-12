@@ -123,6 +123,9 @@ def main():
         if axial:
             from rfd_axial import install
             plugin_counts["rfd_axial"] = install(axial)
+        if os.environ.get("NABLOOP_RFD_SE3_EXACT") == "1":
+            from rfd_se3_exact import install
+            plugin_counts["rfd_se3_exact"] = install(torch)
         if os.environ.get("NABLOOP_RFD_MSA_PAIR") == "1":
             from rfd_msa_pair import install
             plugin_counts["rfd_msa_pair"] = install(torch)

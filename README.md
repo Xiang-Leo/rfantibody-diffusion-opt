@@ -1,6 +1,38 @@
-# RFantibody
+# RFantibody RFdiffusion optimizations
 
-See [UPLIFTING.md](UPLIFTING.md) for the RFdiffusion consistency mode and local run instructions.
+This repository optimizes the antibody backbone design stage from [RosettaCommons RFantibody](https://github.com/RosettaCommons/RFantibody). The launcher keeps the supplied target, 50 deterministic diffusion steps, and the original FP32 matmul setting. It reuses template preprocessing and reduces redundant SE(3) and axial-attention data movement.
+
+The default `opt/exact` branch contains the optimized code. `baseline/upstream` points to RFantibody commit `3e5a5bb1cb98befde9fc049ae3ff58cabb491f67`.
+
+## Quick start
+
+Use Linux with a compatible NVIDIA GPU and Python 3.10. Install from the pinned lockfile or activate an existing compatible RFantibody environment. Supply the original `RFdiffusion_Ab.pt` checkpoint separately.
+
+```bash
+git clone --branch opt/exact https://github.com/Xiang-Leo/rfantibody-diffusion-opt.git
+cd rfantibody-diffusion-opt
+uv sync --locked --python 3.10
+.venv/bin/python uplifting/run_exact.py \
+  --target scripts/examples/example_inputs/rsv_site3.pdb \
+  --framework scripts/examples/example_inputs/hu-4D5-8_Fv.pdb \
+  --loops 'H1:7,H2:6,H3:7,L1:11,L2:7,L3:9' --hotspots 'T305,T456' \
+  --weights /path/to/RFdiffusion_Ab.pt --designs 1 --seed 0 --gpu 0 \
+  --out runs/rfd-example
+```
+
+The output is `runs/rfd-example/result.qv`. See the [run guide and checkpoint checksum](UPLIFTING.md) and the [upstream checkpoint source](https://github.com/RosettaCommons/RFantibody/blob/3e5a5bb1cb98befde9fc049ae3ff58cabb491f67/include/download_weights.sh).
+
+## Same-GPU validation
+
+| Target and framework residues | Original | Optimized | Speedup |
+| --- | ---: | ---: | ---: |
+| 411 | 84.42 s | 69.79 s | 1.21× |
+| 474 | 117.40 s | 93.55 s | 1.25× |
+
+Each row is one timed pair on an RTX 4090 D, with one backbone at 50 steps per run. The two Quiver outputs matched the corresponding originals after normalizing output-path prefixes. On the short input, the initial state, all 50 sampling steps, and RNG states also matched. The measurements cover the RFdiffusion stage on these two inputs. [Benchmark data](benchmarks/p4-summary.json)
+
+## Upstream RFantibody guide
+
 ### Structure-Based _de novo_ Antibody Design
 
 ![](https://github.com/RosettaCommons/RFantibody/blob/main/github_image.png)

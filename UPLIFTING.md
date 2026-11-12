@@ -4,7 +4,7 @@ This checkout uses RFantibody commit `3e5a5bb1cb98befde9fc049ae3ff58cabb491f67` 
 
 Activate a Linux Python 3.10 environment with a CUDA-capable NVIDIA GPU, PyTorch `2.3.1+cu118`, DGL `2.4.0+cu118`, Triton `2.3.1`, and the upstream RFantibody dependencies. P4 used Python 3.10.22. Supply the antibody checkpoint from outside the checkout. The tested `RFdiffusion_Ab.pt` has SHA-256 `736c18ae8e867ed505d19853fa5380514ff439675d002ff3a73c7287acf07e3c`.
 
-From this checkout:
+Run the launcher from this checkout.
 
 ```bash
 python uplifting/run_exact.py \
@@ -22,4 +22,4 @@ The launcher writes `result.qv`, `run.log`, `metadata.jsonl`, `summary.json`, an
 
 Use `python uplifting/run_exact.py --help` for argument details. The upstream `scripts/rfdiffusion_inference.py` also remains available. The P4 launcher installs the axial packing and SE(3) basis optimizations and isolates the Triton cache RNG before running that script.
 
-The `main` branch points to the pristine upstream commit. The `opt/exact` branch contains the source changes and this launcher. The [P4 benchmark summary](benchmarks/p4-summary.json) records the inputs' sizes, wall times, and the scope of the output comparison. Use `python uplifting/compare_exact.py --help` for same-GPU comparisons against the baseline.
+The `baseline/upstream` branch points to the pristine upstream commit. The `opt/exact` branch contains the source changes and this launcher. The [P4 benchmark summary](benchmarks/p4-summary.json) records input sizes, wall times, and the scope of the comparison. Use `python uplifting/compare_exact.py --help` to compare artifacts after running both versions on the same GPU with the same inputs and settings.

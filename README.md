@@ -1,4 +1,6 @@
 # RFantibody
+
+See [UPLIFTING.md](UPLIFTING.md) for the RFdiffusion consistency mode and local run instructions.
 ### Structure-Based _de novo_ Antibody Design
 
 ![](https://github.com/RosettaCommons/RFantibody/blob/main/github_image.png)

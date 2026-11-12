@@ -19,3 +19,14 @@ dist
 scratch
 .DS_Store
 .devcontainer
+
+# Local inference runtime and outputs
+.venv/
+triton-cache/
+runs/
+local-data/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.qv

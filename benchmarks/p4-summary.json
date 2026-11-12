@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "model": "RFantibody RFdiffusion",
+  "experiment": "P4 same-card exact-mode acceptance",
+  "upstream_commit": "3e5a5bb1cb98befde9fc049ae3ff58cabb491f67",
+  "runtime": {
+    "gpu_model": "NVIDIA GeForce RTX 4090 D",
+    "pytorch": "2.3.1+cu118",
+    "dgl": "2.4.0+cu118",
+    "triton": "2.3.1",
+    "model_dtype": "float32",
+    "tf32_matmul": false
+  },
+  "timing_scope": "Process wall time around the fixed-work inference invocations, including startup and model loading. Source overlay preparation and separate trace runs are excluded.",
+  "comparison": "The normalized Quiver comparison removes known output-path prefixes from tag fields. All other payload bytes, including atom order, coordinates, residue identities, and score text, are compared.",
+  "raw_internal_trace": {
+    "fixture_size": "short",
+    "items": 1,
+    "exact": true,
+    "diffusion_steps_per_item": 50,
+    "coverage": "Initial state, each diffusion step, and Python, NumPy, Torch CPU and CUDA RNG states.",
+    "kernel_cache": "The exact-mode trace was checked with an initially empty Triton cache and isolated cache-filename RNG."
+  },
+  "cases": [
+    {
+      "fixture_size": "short",
+      "input_target_residues": 284,
+      "input_framework_residues": 127,
+      "input_residue_total": 411,
+      "input_length_scope": "Target and framework before CDR sampling. Candidate residue counts may differ.",
+      "completed_items_each_mode": 1,
+      "item_type": "backbone",
+      "diffusion_steps_per_item": 50,
+      "stock_wall_seconds": 84.41639469563961,
+      "exact_wall_seconds": 69.79234437271953,
+      "throughput_factor": 1.2095365968052556,
+      "wall_time_reduction_fraction": 0.17323708712799912,
+      "normalized_quiver_exact": true,
+      "timed_pairs": 1
+    },
+    {
+      "fixture_size": "typical",
+      "input_target_residues": 251,
+      "input_framework_residues": 223,
+      "input_residue_total": 474,
+      "input_length_scope": "Target and framework before CDR sampling. Candidate residue counts may differ.",
+      "completed_items_each_mode": 1,
+      "item_type": "backbone",
+      "diffusion_steps_per_item": 50,
+      "stock_wall_seconds": 117.40200584381819,
+      "exact_wall_seconds": 93.54765499383211,
+      "throughput_factor": 1.254996780534572,
+      "wall_time_reduction_fraction": 0.2031852069181843,
+      "normalized_quiver_exact": true,
+      "timed_pairs": 1
+    }
+  ],
+  "limits": [
+    "One timed stock/exact pair per fixture size on one RTX 4090 D.",
+    "The tested fixture sizes are short and typical. The evidence covers stage inference.",
+    "Same-card results establish equality for the tested inputs and settings."
+  ]
+}

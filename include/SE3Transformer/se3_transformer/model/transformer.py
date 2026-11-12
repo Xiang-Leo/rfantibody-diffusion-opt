@@ -31,7 +31,7 @@ from torch import Tensor
 
 from se3_transformer.model.basis import get_basis, update_basis_with_fused
 from se3_transformer.model.layers.attention import AttentionBlockSE3
-from se3_transformer.model.layers.convolution import ConvSE3, ConvSE3FuseLevel
+from se3_transformer.model.layers.convolution import ConvSE3, ConvSE3FuseLevel, VersatileConvSE3
 from se3_transformer.model.layers.linear import LinearSE3
 from se3_transformer.model.layers.norm import NormSE3
 from se3_transformer.model.layers.pooling import GPooling
@@ -78,6 +78,8 @@ class SE3Transformer(nn.Module):
                  low_memory: bool = False,
                  populate_edge: Optional[Literal['lin', 'arcsin', 'log', 'zero']] = 'lin',
                  sum_over_edge: bool = True,
+                 omit_unused_basis_layouts: bool = False,
+                 inference_edge_chunk_size: int = 0,
                  **kwargs):
         """
         :param num_layers:          Number of attention layers
@@ -151,6 +153,23 @@ class SE3Transformer(nn.Module):
                                                    max_degree=self.max_degree,
                                                    fuse_level=fuse_level))
         self.graph_modules = Sequential(*graph_modules)
+        self.build_output_basis = True
+        self.build_input_basis = True
+        self.build_fully_fused_basis = self.tensor_cores and not self.low_memory
+        if omit_unused_basis_layouts:
+            convolutions = [module for module in self.graph_modules.modules() if isinstance(module, ConvSE3)]
+            self.build_output_basis = any(hasattr(module, 'conv_out') for module in convolutions)
+            self.build_input_basis = any(hasattr(module, 'conv_in') for module in convolutions)
+            self.build_fully_fused_basis &= any(
+                module.used_fuse_level == ConvSE3FuseLevel.FULL for module in convolutions
+            )
+
+        if inference_edge_chunk_size < 0:
+            raise ValueError('inference_edge_chunk_size must be zero or positive')
+        if inference_edge_chunk_size:
+            for module in self.graph_modules.modules():
+                if isinstance(module, VersatileConvSE3):
+                    module.inference_edge_chunk_size = inference_edge_chunk_size
 
         if pooling is not None:
             assert return_type is not None, 'return_type must be specified when pooling'
@@ -165,8 +184,11 @@ class SE3Transformer(nn.Module):
                                    amp=torch.is_autocast_enabled())
 
         # Add fused bases (per output degree, per input degree, and fully fused) to the dict
-        basis = update_basis_with_fused(basis, self.max_degree, use_pad_trick=self.tensor_cores and not self.low_memory,
-                                        fully_fused=self.tensor_cores and not self.low_memory)
+        basis = update_basis_with_fused(
+            basis, self.max_degree, use_pad_trick=self.tensor_cores and not self.low_memory,
+            fully_fused=self.build_fully_fused_basis, build_output_layouts=self.build_output_basis,
+            build_input_layouts=self.build_input_basis,
+        )
         
         if self.populate_edge=='lin':
             edge_feats = get_populated_edge_features(graph.edata['rel_pos'], edge_feats)

@@ -1,4 +1,6 @@
 import torch
+
+from nabloop_rfd_runtime import LEVERS, cached
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
@@ -65,7 +67,12 @@ class MSAPairStr2MSA(nn.Module):
         # update query sequence feature (first sequence in the MSA) with feedbacks (state) from SE3
         state = self.norm_state(state)
         state = self.proj_state(state).reshape(B, 1, L, -1)
-        msa = msa.index_add(1, torch.tensor([0,], device=state.device), state)
+        if "msa-index" in LEVERS:
+            first_row = cached("msa_first_row", None, lambda: torch.tensor([0], device=state.device),
+                               state.device)
+        else:
+            first_row = torch.tensor([0], device=state.device)
+        msa = msa.index_add(1, first_row, state)
         #
         # Apply row/column attention to msa & transform 
         msa = msa + self.drop_row(self.row_attn(msa, pair))

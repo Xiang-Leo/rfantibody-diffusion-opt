@@ -136,6 +136,7 @@ class VersatileConvSE3(nn.Module):
         self.channels_out = channels_out
         self.channels_in = channels_in
         self.fuse_level = fuse_level
+        self.inference_edge_chunk_size = 0
         self.radial_func = RadialProfile(num_freq=freq_sum,
                                          channels_in=channels_in,
                                          channels_out=channels_out,
@@ -146,7 +147,13 @@ class VersatileConvSE3(nn.Module):
         with nvtx_range(f'VersatileConvSE3'):
             num_edges = features.shape[0]
             in_dim = features.shape[2]
-            if (self.training or num_edges<=4096):
+            chunk_size = self.inference_edge_chunk_size
+            use_inference_chunks = (
+                chunk_size > 0 and features.is_cuda and features.dtype == torch.float32
+                and not torch.is_grad_enabled() and not torch.is_autocast_enabled()
+            )
+            use_dense = num_edges <= chunk_size if use_inference_chunks else self.training or num_edges <= 4096
+            if use_dense:
                 with nvtx_range(f'RadialProfile'):
                     radial_weights = self.radial_func(invariant_edge_feats) \
                         .view(-1, self.channels_out, self.channels_in * self.freq_sum)
@@ -165,8 +172,8 @@ class VersatileConvSE3(nn.Module):
                     retval = radial_weights @ features
                     
             else:
-                #fd reduce memory in inference
-                EDGESTRIDE = 65536 #16384
+                # Keep the existing edge math and vary only the working set.
+                edge_stride = chunk_size if use_inference_chunks else 65536
                 if basis is not None:
                     out_dim = basis.shape[-1]
                     if self.fuse_level != ConvSE3FuseLevel.FULL:
@@ -180,8 +187,8 @@ class VersatileConvSE3(nn.Module):
                     device=features.device
                 )
 
-                for i in range((num_edges-1)//EDGESTRIDE+1):
-                    e_i,e_j = i*EDGESTRIDE, min((i+1)*EDGESTRIDE,num_edges)
+                for e_i in range(0, num_edges, edge_stride):
+                    e_j = min(e_i + edge_stride, num_edges)
 
                     radial_weights = self.radial_func(invariant_edge_feats[e_i:e_j]) \
                         .view(-1, self.channels_out, self.channels_in * self.freq_sum)

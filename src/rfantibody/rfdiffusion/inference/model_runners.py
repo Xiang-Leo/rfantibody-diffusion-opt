@@ -8,6 +8,8 @@ from hydra.core.hydra_config import HydraConfig
 from icecream import ic
 from omegaconf import DictConfig, OmegaConf
 
+from nabloop_rfd_runtime import LEVERS, phase, reset_design_cache
+
 import rfantibody.rfdiffusion.util
 from rfantibody.rfdiffusion.chemical import INIT_CRDS, seq2chars
 from rfantibody.rfdiffusion.contigs import ContigMap
@@ -15,6 +17,8 @@ from rfantibody.rfdiffusion.diffusion import Diffuser
 from rfantibody.rfdiffusion.inference import ab_pose, symmetry
 from rfantibody.rfdiffusion.inference import utils as iu
 from rfantibody.rfdiffusion.inference.ab_util import (
+    CORRECTED_SELFCOND_SCHEMES,
+    EXACT_PREPROCESS,
     correct_selfcond,
     featurize,
     process_init_selfcond,
@@ -29,6 +33,7 @@ from rfantibody.rfdiffusion.util_module import ComputeAllAtomCoords
 TOR_INDICES  = rfantibody.rfdiffusion.util.torsion_indices
 TOR_CAN_FLIP = rfantibody.rfdiffusion.util.torsion_can_flip
 REF_ANGLES   = rfantibody.rfdiffusion.util.reference_angles
+QUIET_STEPS = os.environ.get("NABLOOP_RFD_QUIET_STEPS") == "1"
 
 
 class Sampler:
@@ -357,6 +362,9 @@ class AbSampler(Sampler):
 
         #### 1) Parse pdb to an ab_pose that can be easily manipulated
         ####################################################################
+        reset_design_cache()
+        self._nabloop_idx_pdb = None
+        self._nabloop_motif_mask = None
         self.pose = ab_pose.AbPose()
 
         # Determine which format the input structure has been provided
@@ -502,6 +510,14 @@ class AbSampler(Sampler):
         tmp_xyz = torch.full((L,27,3), np.nan)
         tmp_xyz[:,:14] = xyz_t # [L,27,3]
 
+        # Structural self-conditioning replaces the initial t2d in these schemes.
+        defer_t2d = (
+            EXACT_PREPROCESS
+            and self.ab_conf.T_scheme in CORRECTED_SELFCOND_SCHEMES
+            and not self.ab_item.inputs.fixed_dock
+            and t < self.diffuser.T
+            and t != self.diffuser_conf.partial_T
+        )
         # Featurize expects xyz to have 27 atom dimensions
         features = featurize(
                              self.ab_item,
@@ -512,7 +528,8 @@ class AbSampler(Sampler):
                              self.ab_conf.T_scheme,
                              1 - (t / self.T),
                              ~self.preprocess_conf.motif_sidechain_input,
-                             ~self.ab_conf.no_bugfix_t1d_mask
+                             ~self.ab_conf.no_bugfix_t1d_mask,
+                             template_required=not defer_t2d,
                             )
 
         ## 2) Now generate the time-invariant features
@@ -521,9 +538,16 @@ class AbSampler(Sampler):
         ## idx_pdb ##
         #############
 
-        idx_pdb = torch.arange(L) # (L)
-        if self.ab_item.target:
-            idx_pdb[self.ab_item.target_mask] += 200 # Do idx jump at chainbreak
+        if self._nabloop_idx_pdb is not None:
+            idx_pdb = self._nabloop_idx_pdb
+        else:
+            idx_pdb = torch.arange(L)
+            if self.ab_item.target:
+                idx_pdb[self.ab_item.target_mask] += 200
+            idx_pdb = idx_pdb.unsqueeze(0)
+            if "indices" in LEVERS:
+                idx_pdb = idx_pdb.to(self.device)
+                self._nabloop_idx_pdb = idx_pdb
         
         ## Add hotspots to t1d ##
         #########################
@@ -534,22 +558,23 @@ class AbSampler(Sampler):
                   features['msa_full'],
                   features['seq'],
                   features['xyz_prev'].unsqueeze(0),
-                  idx_pdb.unsqueeze(0),
+                  idx_pdb,
                   features['t1d'].unsqueeze(0),
-                  features['t2d'].unsqueeze(0),
+                  None if defer_t2d else features['t2d'].unsqueeze(0),
                   features['xyz_t'].unsqueeze(0),
                   features['alpha_t'].unsqueeze(0)
                  )
 
         # Send all inputs to device
-        retval = [i.to(self.device) for i in retval]
+        retval = [i.to(self.device) if i is not None else None for i in retval]
 
         return retval
 
     def sample_step(self, *, t, seq_t, x_t, seq_init, final_step):
 
-        msa_masked, msa_full, seq_in, xt_in, idx_pdb, t1d, t2d, xyz_t, alpha_t = self._preprocess(
-            seq_t, x_t, t)
+        with phase("preprocess"):
+            msa_masked, msa_full, seq_in, xt_in, idx_pdb, t1d, t2d, xyz_t, alpha_t = self._preprocess(
+                seq_t, x_t, t)
 
         B,N,L = xyz_t.shape[:3]
 
@@ -559,7 +584,8 @@ class AbSampler(Sampler):
         if (t < self.diffuser.T) and (t != self.diffuser_conf.partial_T) \
             and self.preprocess_conf.selfcondition_msaprev and self.preprocess_conf.msaprev_bugfix:
 
-            ic('Providing Ab Seq Self Cond')
+            if not QUIET_STEPS:
+                ic('Providing Ab Seq Self Cond')
             msa_prev = self.msa_prev
 
         else:
@@ -570,7 +596,8 @@ class AbSampler(Sampler):
         ##################################
         if (t < self.diffuser.T) and (t != self.diffuser_conf.partial_T):
 
-            ic('Providing Ab Str Self Cond')
+            if not QUIET_STEPS:
+                ic('Providing Ab Str Self Cond')
             xyz_t, t2d, xyz_sc, sc2d = process_selfcond(self.prev_pred, t2d, xyz_t, self.ab_conf, xyz_t.device)
 
             # Correct selfcond now will detect from the checkpoint file whether it
@@ -581,37 +608,45 @@ class AbSampler(Sampler):
                                     self.ab_item.inputs.xyz_true,
                                     self.ab_item.loop_mask,
                                     self.ab_item.target_mask,
-                                    self.ab_item.interchain_mask
+                                    self.ab_item.interchain_mask,
+                                    item=self.ab_item,
                                   )
 
         else:
             # The non-selfcond step for antibodies is to just leave the input as-is
             sc2d, xyz_sc = process_init_selfcond(t2d, xyz_t, self.ab_conf, xyz_t.device)
         
-        print('Monitoring target centering')
-        ic(xyz_t[0,0,self.diffusion_mask,1].mean(dim=0))
-        ic(xt_in[0,self.diffusion_mask,1].mean(dim=0))
+        if not QUIET_STEPS:
+            print('Monitoring target centering')
+            ic(xyz_t[0,0,self.diffusion_mask,1].mean(dim=0))
+            ic(xt_in[0,self.diffusion_mask,1].mean(dim=0))
 
         with torch.no_grad():
             px0=xt_in
+            if "indices" in LEVERS and self._nabloop_motif_mask is None:
+                self._nabloop_motif_mask = self.diffusion_mask.squeeze().to(self.device)
             for rec in range(self.recycle_schedule[t-1]):
-                msa_prev, pair_prev, px0, state_prev, alpha, logits, plddt = self.model(msa_masked,
-                                    msa_full,
-                                    seq_in,
-                                    px0,
-                                    idx_pdb,
-                                    t1d=t1d,
-                                    t2d=t2d,
-                                    sc2d=sc2d,
-                                    xyz_sc=xyz_sc,
-                                    xyz_t=xyz_t,
-                                    alpha_t=alpha_t,
-                                    msa_prev = msa_prev,
-                                    pair_prev = None,
-                                    state_prev = None,
-                                    t=torch.tensor(t),
-                                    return_infer=True,
-                                    motif_mask=self.diffusion_mask.squeeze().to(self.device))   
+                motif_mask = self._nabloop_motif_mask
+                if motif_mask is None:
+                    motif_mask = self.diffusion_mask.squeeze().to(self.device)
+                with phase("network_forward"):
+                    msa_prev, pair_prev, px0, state_prev, alpha, logits, plddt = self.model(msa_masked,
+                                        msa_full,
+                                        seq_in,
+                                        px0,
+                                        idx_pdb,
+                                        t1d=t1d,
+                                        t2d=t2d,
+                                        sc2d=sc2d,
+                                        xyz_sc=xyz_sc,
+                                        xyz_t=xyz_t,
+                                        alpha_t=alpha_t,
+                                        msa_prev = msa_prev,
+                                        pair_prev = None,
+                                        state_prev = None,
+                                        t=torch.tensor(t),
+                                        return_infer=True,
+                                        motif_mask=motif_mask)
 
                 # To permit 'recycling' within a timestep, in a manner akin to how this model was trained
                 # Aim is to basically just replace the xyz_t with the model's last px0, and to *not* recycle the state, pair or msa embeddings
@@ -638,19 +673,23 @@ class AbSampler(Sampler):
         pseq_0[self.mask_seq.squeeze()] = seq_init[self.mask_seq.squeeze()].to(self.device) # [L,22]
         
         if t > final_step:
-            x_t_1, seq_t_1, tors_t_1, px0 = self.denoiser.get_next_pose(
-                xt=x_t,
-                px0=px0,
-                t=t,
-                diffusion_mask=self.mask_str.squeeze(),
-                seq_diffusion_mask=self.mask_seq.squeeze(),
-                seq_t=seq_t,
-                pseq0=pseq_0,
-                diffuse_sidechains=self.preprocess_conf.sidechain_input,
-                align_motif=self.inf_conf.align_motif,
-                include_motif_sidechains=self.preprocess_conf.motif_sidechain_input
-            )
-            self._log.info(
+            with phase("denoise"):
+                x_t_1, seq_t_1, tors_t_1, px0 = self.denoiser.get_next_pose(
+                    xt=x_t,
+                    px0=px0,
+                    t=t,
+                    diffusion_mask=self.mask_str.squeeze(),
+                    seq_diffusion_mask=self.mask_seq.squeeze(),
+                    seq_t=seq_t,
+                    pseq0=pseq_0,
+                    diffuse_sidechains=self.preprocess_conf.sidechain_input,
+                    align_motif=self.inf_conf.align_motif,
+                    include_motif_sidechains=self.preprocess_conf.motif_sidechain_input
+                )
+            if QUIET_STEPS:
+                self._log.info('Timestep %d, input to next step: [sequence omitted]', t)
+            else:
+                self._log.info(
                     f'Timestep {t}, input to next step: { seq2chars(torch.argmax(seq_t_1, dim=-1).tolist())}')
         else:
             x_t_1 = torch.clone(px0).to(x_t.device)

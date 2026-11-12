@@ -99,42 +99,46 @@ def get_basis_script(max_degree: int,
 def update_basis_with_fused(basis: Dict[str, Tensor],
                             max_degree: int,
                             use_pad_trick: bool,
-                            fully_fused: bool) -> Dict[str, Tensor]:
+                            fully_fused: bool,
+                            build_output_layouts: bool = True,
+                            build_input_layouts: bool = True) -> Dict[str, Tensor]:
     """ Update the basis dict with partially and optionally fully fused bases """
     num_edges = basis['0,0'].shape[0]
     device = basis['0,0'].device
     dtype = basis['0,0'].dtype
     sum_dim = sum([degree_to_dim(d) for d in range(max_degree + 1)])
 
-    # Fused per output degree
-    for d_out in range(max_degree + 1):
-        sum_freq = sum([degree_to_dim(min(d, d_out)) for d in range(max_degree + 1)])
-        basis_fused = torch.zeros(num_edges, sum_dim, sum_freq, degree_to_dim(d_out) + int(use_pad_trick),
-                                  device=device, dtype=dtype)
-        acc_d, acc_f = 0, 0
-        for d_in in range(max_degree + 1):
-            basis_fused[:, acc_d:acc_d + degree_to_dim(d_in), acc_f:acc_f + degree_to_dim(min(d_out, d_in)),
-            :degree_to_dim(d_out)] = basis[f'{d_in},{d_out}'][:, :, :, :degree_to_dim(d_out)]
-
-            acc_d += degree_to_dim(d_in)
-            acc_f += degree_to_dim(min(d_out, d_in))
-
-        basis[f'out{d_out}_fused'] = basis_fused
-
-    # Fused per input degree
-    for d_in in range(max_degree + 1):
-        sum_freq = sum([degree_to_dim(min(d, d_in)) for d in range(max_degree + 1)])
-        basis_fused = torch.zeros(num_edges, degree_to_dim(d_in), sum_freq, sum_dim,
-                                  device=device, dtype=dtype)
-        acc_d, acc_f = 0, 0
+    if build_output_layouts or fully_fused:
+        # Fused per output degree
         for d_out in range(max_degree + 1):
-            basis_fused[:, :, acc_f:acc_f + degree_to_dim(min(d_out, d_in)), acc_d:acc_d + degree_to_dim(d_out)] \
-                = basis[f'{d_in},{d_out}'][:, :, :, :degree_to_dim(d_out)]
+            sum_freq = sum([degree_to_dim(min(d, d_out)) for d in range(max_degree + 1)])
+            basis_fused = torch.zeros(num_edges, sum_dim, sum_freq, degree_to_dim(d_out) + int(use_pad_trick),
+                                      device=device, dtype=dtype)
+            acc_d, acc_f = 0, 0
+            for d_in in range(max_degree + 1):
+                basis_fused[:, acc_d:acc_d + degree_to_dim(d_in), acc_f:acc_f + degree_to_dim(min(d_out, d_in)),
+                :degree_to_dim(d_out)] = basis[f'{d_in},{d_out}'][:, :, :, :degree_to_dim(d_out)]
 
-            acc_d += degree_to_dim(d_out)
-            acc_f += degree_to_dim(min(d_out, d_in))
+                acc_d += degree_to_dim(d_in)
+                acc_f += degree_to_dim(min(d_out, d_in))
 
-        basis[f'in{d_in}_fused'] = basis_fused
+            basis[f'out{d_out}_fused'] = basis_fused
+
+    if build_input_layouts:
+        # Fused per input degree
+        for d_in in range(max_degree + 1):
+            sum_freq = sum([degree_to_dim(min(d, d_in)) for d in range(max_degree + 1)])
+            basis_fused = torch.zeros(num_edges, degree_to_dim(d_in), sum_freq, sum_dim,
+                                      device=device, dtype=dtype)
+            acc_d, acc_f = 0, 0
+            for d_out in range(max_degree + 1):
+                basis_fused[:, :, acc_f:acc_f + degree_to_dim(min(d_out, d_in)), acc_d:acc_d + degree_to_dim(d_out)] \
+                    = basis[f'{d_in},{d_out}'][:, :, :, :degree_to_dim(d_out)]
+
+                acc_d += degree_to_dim(d_out)
+                acc_f += degree_to_dim(min(d_out, d_in))
+
+            basis[f'in{d_in}_fused'] = basis_fused
 
     if fully_fused:
         # Fully fused

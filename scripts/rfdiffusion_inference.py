@@ -28,6 +28,8 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 
+from nabloop_rfd_runtime import finish_phase, phase, start_phase, write_profile
+
 from rfantibody.rfdiffusion.chemical import num2aa
 from rfantibody.rfdiffusion.inference import model_runners
 from rfantibody.rfdiffusion.util import generate_Cbeta, writepdb, writepdb_multi
@@ -35,6 +37,7 @@ from rfantibody.util.io import ab_write_pdblines
 from rfantibody.util.quiver import Quiver
 
 conversion = 'ARNDCQEGHILKMFPSTWYV-'
+QUIET_STEPS = os.environ.get("NABLOOP_RFD_QUIET_STEPS") == "1"
 
 def make_deterministic(seed=0):
         torch.manual_seed(seed)
@@ -52,7 +55,8 @@ def main(conf: HydraConfig) -> None:
         conf.inference.write_trajectory = False
 
     # Initialize sampler and target/contig.
-    sampler = model_runners.AbSampler(conf)
+    with phase("initialize"):
+        sampler = model_runners.AbSampler(conf)
     
     # Loop over number of designs to sample.
     design_startnum = sampler.inf_conf.design_startnum
@@ -136,7 +140,8 @@ def main(conf: HydraConfig) -> None:
         failed=0
         while True:
 
-            x_init, seq_init = sampler.sample_init()
+            with phase("sample_init"):
+                x_init, seq_init = sampler.sample_init()
             denoised_xyz_stack = []
             px0_xyz_stack = []
             seq_stack = []
@@ -155,7 +160,8 @@ def main(conf: HydraConfig) -> None:
                 chi1_stack.append(tors_t[:,:])
                 plddt_stack.append(plddt[0]) # remove singleton leading dimension
                 
-                print("Sequence of Hotspot Residues:","".join(conversion[i] for i in torch.argmax(seq_t, dim=1)[sampler.ab_item.hotspots]))
+                if not QUIET_STEPS:
+                    print("Sequence of Hotspot Residues:","".join(conversion[i] for i in torch.argmax(seq_t, dim=1)[sampler.ab_item.hotspots]))
                 if conf.antibody.terminate_bad_targeting is not None:
                     #TODO move to a separate function to avoid repetition
                     # Loop through the hotspots, find the closest loop residue by Cb distance
@@ -251,6 +257,7 @@ def main(conf: HydraConfig) -> None:
             with open(f'{out_prefix}.trb','wb') as f_out:
                 pickle.dump(trb, f_out)
 
+        write_started = start_phase()
         #### Write out structure
         ####################################
         if sampler.ab_design():
@@ -322,7 +329,11 @@ def main(conf: HydraConfig) -> None:
                 writepdb_multi(out_px0, px0_xyz_stack, bfacts, 
                     final_seq.squeeze(), use_hydrogens=False, backbone_only=False, chain_ids=sampler.chain_idx)
 
+        finish_phase("write_output", write_started)
         log.info(f'Finished design in {(time.time()-start_time)/60:.2f} minutes')
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        write_profile()

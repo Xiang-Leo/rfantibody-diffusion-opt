@@ -1,6 +1,8 @@
 import math
 
 import torch
+
+from nabloop_rfd_runtime import LEVERS, cached
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
@@ -106,13 +108,20 @@ class PositionalEncoding2D(nn.Module):
         self.drop = nn.Dropout(p_drop)
 
     def forward(self, x, idx):
-        bins = torch.arange(self.minpos, self.maxpos, device=x.device)
-        seqsep = idx[:,None,:] - idx[:,:,None] # (B, L, L)
-        #
-        ib = torch.bucketize(seqsep, bins).long() # (B, L, L)
+        if "indices" in LEVERS:
+            ib = cached("position_buckets", idx, lambda: self.bucket_indices(x, idx),
+                        (self.minpos, self.maxpos, x.device))
+        else:
+            ib = self.bucket_indices(x, idx)
         emb = self.emb(ib) #(B, L, L, d_model)
         x = x + emb # add relative positional encoding
         return self.drop(x)
+
+    def bucket_indices(self, x, idx):
+        bins = torch.arange(self.minpos, self.maxpos, device=x.device)
+        seqsep = idx[:,None,:] - idx[:,:,None]
+        return torch.bucketize(seqsep, bins).long()
+
 
 class MSA_emb(nn.Module):
     # Get initial seed MSA embedding

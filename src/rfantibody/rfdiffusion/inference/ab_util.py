@@ -1,3 +1,5 @@
+import os
+
 import torch
 from icecream import ic
 
@@ -26,6 +28,13 @@ schemes = {
 
 selfcond_emb_schemes = {
     'selfcond_emb'
+}
+
+
+EXACT_PREPROCESS = os.environ.get('NABLOOP_RFD_EXACT_PREPROCESS') == '1'
+CORRECTED_SELFCOND_SCHEMES = {
+    'single_T_correct_selfcond',
+    'noSeq_single_T_correct_selfcond',
 }
 
 
@@ -118,7 +127,9 @@ def correct_selfcond(
                      xyz_true: torch.Tensor(),
                      loop_mask: torch.Tensor(),
                      target_mask: torch.Tensor(),
-                     interchain_mask: torch.Tensor()
+                     interchain_mask: torch.Tensor(),
+                     *,
+                     item=None,
                     ) -> torch.Tensor:
     '''
         Given t2d calculated from the model's previous prediction, correct the target and framework Ab
@@ -136,37 +147,44 @@ def correct_selfcond(
 
     '''
 
-    corrected_schemes = {
-                'single_T_correct_selfcond',
-                'noSeq_single_T_correct_selfcond'
-              }
-
-    if ab_param['T_scheme'] not in corrected_schemes:
+    if ab_param['T_scheme'] not in CORRECTED_SELFCOND_SCHEMES:
         print('Not correcting templated regions in the self conditioning t2d feature')
         return t2d
 
     print('Correcting constant t2d entries')
 
-    t2d_true = xyz_to_t2d(xyz_true[None,None]).to(t2d.device) # [B,T,L,L,44]
+    inputs = (xyz_true, loop_mask, target_mask, interchain_mask)
+    cache_key = None
+    if EXACT_PREPROCESS and item is not None and not (
+        torch.is_autocast_enabled() or torch.is_autocast_cpu_enabled()
+    ) and all(not x.requires_grad and not x.is_inference() for x in inputs):
+        cache_key = (t2d.device, tuple((id(x), x._version) for x in inputs))
+    cache = getattr(item, '_exact_selfcond_rows', None) if cache_key is not None else None
 
-    zeros = torch.zeros_like(t2d_true[...,:1]).to(t2d.device) # [B,T,L,L,1]
-    t2d_true = torch.cat((t2d_true,zeros), dim=-1) # [B,T,L,L,45]; Added selfcond one-hot dimension
+    if cache is not None and cache[0] == cache_key:
+        _, _, target_mask2d, binder_mask2d, target_rows, binder_rows = cache
+    else:
+        t2d_true = xyz_to_t2d(xyz_true[None,None]).to(t2d.device) # [B,T,L,L,44]
+        zeros = torch.zeros_like(t2d_true[...,:1]).to(t2d.device) # [B,T,L,L,1]
+        t2d_true = torch.cat((t2d_true,zeros), dim=-1) # [B,T,L,L,45]
 
-    target_mask2d = target_mask[None] * target_mask[:,None]
+        target_mask2d = target_mask[None] * target_mask[:,None]
+        design_mask = ~target_mask * ~loop_mask
+        binder_mask2d = design_mask[None] * design_mask[:,None] * ~interchain_mask
 
-    design_mask   = ~target_mask * ~loop_mask # This is a mask of the constant binder region
-
-    # We are leaving out the interchain contacts
-    binder_mask2d = design_mask[None] * design_mask[:,None] * ~interchain_mask
+        target_rows = t2d_true[:,:,target_mask2d]
+        binder_rows = t2d_true[:,:,binder_mask2d]
+        if cache_key is not None:
+            # Keep the input references alive so the IDs cannot be reused.
+            item._exact_selfcond_rows = (
+                cache_key, inputs, target_mask2d, binder_mask2d, target_rows, binder_rows
+            )
 
     t2d[...,44] = 1 # All entries in t2d originally come from self conditioning so we will mark them as true
     t2d[...,43] = 0 # Mark all entries initially as non-templates - this will be updated below
 
-    # Correct the target contact entries
-    t2d[:,:,target_mask2d] = t2d_true[:,:,target_mask2d]
-
-    # Correct the binder framework contact entries
-    t2d[:,:,binder_mask2d] = t2d_true[:,:,binder_mask2d]
+    t2d[:,:,target_mask2d] = target_rows
+    t2d[:,:,binder_mask2d] = binder_rows
 
     return t2d
 
@@ -177,7 +195,9 @@ def apply_templating_scheme(item,
                             t2d,
                             T_scheme,
                             hotspot_dim,
-                            timestep):
+                            timestep,
+                            *,
+                            template_required=True):
     '''
     Take the template features which have been featurized normally and apply the selected
     templating scheme to them
@@ -212,8 +232,12 @@ def apply_templating_scheme(item,
 
     ret_xyz_t = torch.clone(xyz_t)
 
-    # For all templating shemes, we will need the true t2d
-    ret_t2d = xyz_to_t2d(item.inputs.xyz_true[None,None]).squeeze(0) # [T,L,L,44]
+    if template_required:
+        ret_t2d = xyz_to_t2d(item.inputs.xyz_true[None,None]).squeeze(0) # [T,L,L,44]
+    else:
+        if item.inputs.fixed_dock or T_scheme not in CORRECTED_SELFCOND_SCHEMES:
+            raise ValueError('The templating scheme requires the original t2d feature')
+        ret_t2d = None
 
     # Annotate which residues in t1d are missing/masked
     ret_t1d = torch.clone(t1d)
@@ -362,35 +386,23 @@ def apply_templating_scheme(item,
                 # Subtract 1 from hotspot dim since hotspot dim is 1 indexed
                 ret_t1d[:,:,hotspot_dim-1] = item.hotspots
 
-                ## t2d ##
-                #########
-                # Mask the interchain contacts
-                upper_right_diag = ~item.target_mask[None] * item.target_mask[:,None]
-                lower_left_diag  = item.target_mask[None] * ~item.target_mask[:,None]
-
-                # Simply writing to slices was not working for me, doing this more
-                # convoluted method to write to the diagonals - NRB
-
-                ret_t2d[:,upper_right_diag] = 0
-                ret_t2d[:,lower_left_diag]  = 0
-
-                ret_t2d[:,item.loop_mask] = 0
-                ret_t2d[:,:,item.loop_mask]  = 0
-
             else:
                 ## t1d ##
                 #########
                 ret_t1d[:,~item.loop_mask,21] = 1
                 ret_t1d[:,item.loop_mask,21]  = timestep # 22nd entry is confidence
 
-                ## t2d ##
-                #########
-                # In the monomer case, just mask the loops
+            if template_required:
+                if item.target:
+                    # Mask target–antibody contacts before masking the diffused loops.
+                    upper_right_diag = ~item.target_mask[None] * item.target_mask[:,None]
+                    lower_left_diag = item.target_mask[None] * ~item.target_mask[:,None]
+                    ret_t2d[:,upper_right_diag] = 0
+                    ret_t2d[:,lower_left_diag] = 0
                 ret_t2d[:,item.loop_mask] = 0
                 ret_t2d[:,:,item.loop_mask] = 0
 
-
-            if T_scheme in {'single_T_correct_selfcond', 'noSeq_single_T_correct_selfcond'}:
+            if T_scheme in CORRECTED_SELFCOND_SCHEMES:
                 # Expand t2d feature to allow for a feature which indicates which positions are true
                 # and which are predicted
 
@@ -421,11 +433,13 @@ def apply_templating_scheme(item,
                    item.ab_interchain_mask[upper_interchain] = True
                    item.ab_interchain_mask[lower_interchain] = True
 
-                   # Mask H-L contacts
-                   ret_t2d[:,item.ab_interchain_mask] = 0 
+                   if template_required:
+                       # Mask H-L contacts
+                       ret_t2d[:,item.ab_interchain_mask] = 0
 
-                zeros   = torch.zeros_like(ret_t2d[...,:1]) # [T,L,L,1]
-                ret_t2d = torch.cat((ret_t2d, zeros), dim=-1) # [T,L,L,45]
+                if template_required:
+                    zeros = torch.zeros_like(ret_t2d[...,:1]) # [T,L,L,1]
+                    ret_t2d = torch.cat((ret_t2d, zeros), dim=-1) # [T,L,L,45]
 
 
         elif T_scheme == 'no_T':
@@ -477,7 +491,9 @@ def featurize(item,
               T_scheme,
               timestep,
               mask_all_sc,
-              bugfix_t1d_mask):
+              bugfix_t1d_mask,
+              *,
+              template_required=True):
     '''
     Takes a sequence and a noised structure and returns features ready to be fed into the model
 
@@ -559,10 +575,10 @@ def featurize(item,
     if bugfix_t1d_mask:
         t1d[:,:,20]  = seq[None,:,21] # The 22nd entry in seq is mask and the 21st entry in t1d is mask
 
-    ## t2d ##
-    #########
-    t2d = xyz_to_t2d(xyz_t.unsqueeze(0)) # (B,T,L,L,44), this function requires a batch dimension
-    t2d = t2d.squeeze(0) # (T,L,L,44)
+    # apply_templating_scheme derives t2d from the true geometry.
+    t2d = None
+    if not EXACT_PREPROCESS:
+        t2d = xyz_to_t2d(xyz_t.unsqueeze(0)).squeeze(0) # (T,L,L,44)
 
     ## alpha_t ##
     #############
@@ -585,7 +601,8 @@ def featurize(item,
                                                t2d,
                                                T_scheme,
                                                hotspot_dim,
-                                               timestep
+                                               timestep,
+                                               template_required=template_required,
                                              )
 
     input_dict = {

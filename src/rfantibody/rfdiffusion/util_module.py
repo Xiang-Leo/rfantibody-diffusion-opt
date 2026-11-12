@@ -5,6 +5,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from nabloop_rfd_runtime import LEVERS, cached
+
 from rfantibody.rfdiffusion.util import *
 
 
@@ -85,8 +87,14 @@ class Dropout(nn.Module):
 def rbf(D):
     # Distance radial basis function
     D_min, D_max, D_count = 0., 20., 36
-    D_mu = torch.linspace(D_min, D_max, D_count).to(D.device)
-    D_mu = D_mu[None,:]
+    if "rbf" in LEVERS:
+        D_mu = cached(
+            "rbf_centers", None,
+            lambda: torch.linspace(D_min, D_max, D_count).to(D.device)[None, :],
+            (D.device, torch.get_default_dtype()),
+        )
+    else:
+        D_mu = torch.linspace(D_min, D_max, D_count).to(D.device)[None, :]
     D_sigma = (D_max - D_min) / D_count
     D_expand = torch.unsqueeze(D, -1)
     RBF = torch.exp(-((D_expand - D_mu) / D_sigma)**2)
@@ -100,6 +108,12 @@ def get_seqsep(idx):
         - seqsep: sequence separation feature with sign (B, L, L, 1)
                   Sergey found that having sign in seqsep features helps a little
     '''
+    if "indices" in LEVERS:
+        return cached("neighbor_separations", idx, lambda: _neighbor_separations(idx))
+    return _neighbor_separations(idx)
+
+
+def _neighbor_separations(idx):
     seqsep = idx[:,None,:] - idx[:,:,None]
     sign = torch.sign(seqsep)
     neigh = torch.abs(seqsep)
@@ -120,16 +134,28 @@ def make_full_graph(xyz, pair, idx, top_k=64, kmin=9):
     B, L = xyz.shape[:2]
     device = xyz.device
     
-    # seq sep
-    sep = idx[:,None,:] - idx[:,:,None]
-    b,i,j = torch.where(sep.abs() > 0)
-   
-    src = b*L+i
-    tgt = b*L+j
-    G = dgl.graph((src, tgt), num_nodes=B*L).to(device)
+    if "full-graph" in LEVERS:
+        topology, b, i, j = cached(
+            "full_graph_topology", idx, lambda: _full_graph_topology(idx, B, L, device),
+            (B, L, device),
+        )
+        # Independent feature frames. Every call still supplies its own coordinates.
+        G = topology.local_var()
+    else:
+        G, b, i, j = _full_graph_topology(idx, B, L, device)
     G.edata['rel_pos'] = (xyz[b,j,:] - xyz[b,i,:]).detach() # no gradient through basis function
 
     return G, pair[b,i,j][...,None]
+
+
+def _full_graph_topology(idx, batch_size, length, device):
+    sep = idx[:, None, :] - idx[:, :, None]
+    b, i, j = torch.where(sep.abs() > 0)
+    src = b * length + i
+    tgt = b * length + j
+    graph = dgl.graph((src, tgt), num_nodes=batch_size * length).to(device)
+    return graph, b, i, j
+
 
 def make_topk_graph(xyz, pair, idx, top_k=64, kmin=32, eps=1e-6):
     '''

@@ -246,7 +246,8 @@ class Str2Str(nn.Module):
         nn.init.zeros_(self.embed_e2.bias)
     
     @torch.cuda.amp.autocast(enabled=False)
-    def forward(self, msa, pair, R_in, T_in, xyz, state, idx, motif_mask, top_k=64, eps=1e-5):
+    def forward(self, msa, pair, R_in, T_in, xyz, state, idx, motif_mask, top_k=64, eps=1e-5,
+                *, rbf_feat=None):
         B, N, L = msa.shape[:3]
 
         if motif_mask is None:
@@ -262,7 +263,8 @@ class Str2Str(nn.Module):
         pair = self.norm_edge1(self.embed_e1(pair))
         
         neighbor = get_seqsep(idx)
-        rbf_feat = rbf(torch.cdist(xyz[:,:,1], xyz[:,:,1]))
+        if rbf_feat is None:
+            rbf_feat = rbf(torch.cdist(xyz[:,:,1], xyz[:,:,1]))
         pair = torch.cat((pair, rbf_feat, neighbor), dim=-1)
         pair = self.norm_edge2(self.embed_e2(pair))
         
@@ -351,7 +353,21 @@ class IterBlock(nn.Module):
             msa = self.msa2msa(msa, pair, rbf_feat, state)
             pair = self.msa2pair(msa, pair)
             pair = self.pair2pair(pair, rbf_feat)
-            R, T, state, alpha = self.str2str(msa, pair, R_in, T_in, xyz, state, idx, motif_mask=motif_mask, top_k=0) 
+            str2str_options = {"motif_mask": motif_mask, "top_k": 0}
+            if (
+                "ca-rbf" in LEVERS
+                and not self.training
+                and not self.str2str.training
+                and not torch.is_grad_enabled()
+                and not torch.is_autocast_enabled()
+                and not torch.is_autocast_cpu_enabled()
+                and xyz.dtype == rbf_feat.dtype == torch.float32
+            ):
+                # The MSA and pair updates read this feature and leave xyz unchanged.
+                str2str_options["rbf_feat"] = rbf_feat
+            R, T, state, alpha = self.str2str(
+                msa, pair, R_in, T_in, xyz, state, idx, **str2str_options,
+            )
         
         return msa, pair, R, T, state, alpha
 

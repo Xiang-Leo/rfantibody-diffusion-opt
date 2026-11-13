@@ -1,4 +1,4 @@
-# RFdiffusion P4 exact mode
+# RFdiffusion exact inference
 
 This checkout uses RFantibody commit `3e5a5bb1cb98befde9fc049ae3ff58cabb491f67` with the P4 inference optimizations. The launcher uses the full target, 50 diffusion steps, the original FP32 matmul setting, and one deterministic seed per backbone. P4 produced identical normalized Quiver output to the pinned original on short and typical inputs on the same GPU. The short test also matched all 50 sampling steps and RNG states. Exactness and performance for a new GPU or target require a paired comparison.
 
@@ -16,10 +16,33 @@ python uplifting/run_exact.py \
   --out /path/to/new-run
 ```
 
-Use the target PDB's chain letters and residue numbers for hotspots. Match loop names and lengths to the annotated framework. With multiple designs, seeds advance by one from `--seed`. Set `--gpu` to an available CUDA device index or UUID, or omit it to use the existing CUDA device assignment.
+Use the target PDB's chain letters and residue numbers for hotspots. Omit `--hotspots` for an empty hotspot mask. Match loop names and lengths to the annotated framework. With multiple designs, seeds advance by one from `--seed`. Set `--gpu` to an available CUDA device index or UUID, or omit it to use the existing CUDA device assignment. `--output-prefix` sets the Quiver tag prefix.
 
 The launcher writes `result.qv`, `run.log`, `metadata.jsonl`, `summary.json`, and Hydra configuration in the new output directory. `--schedule-dir` can reuse a trusted upstream cache containing `T_50_omega_1000_min_sigma_0_02_min_b_1_5_max_b_2_5_schedule_linear.pkl` and `cached_schedules/`. Without it, upstream inference generates its tables as needed. Pass `--triton-cache` to reuse a compilation cache across runs. First-run table generation and compilation affect wall time.
 
 Use `python uplifting/run_exact.py --help` for argument details. The upstream `scripts/rfdiffusion_inference.py` also remains available. The P4 launcher installs the axial packing and SE(3) basis optimizations and isolates the Triton cache RNG before running that script.
+
+The launcher also accepts two independent settings for the original P4 path.
+
+- `--se3-exact` packs node features before expanding them onto edges, reuses self-interaction at each destination, and uses a four-term FP32 Triton projection for the measured full SE(3) chunks. The node and projection invocation counts appear in `summary.json`.
+- `--reuse-ca-rbf` reuses the Cα distance features between the pair update and structure update in each eligible inference block.
+
+The SE(3) experiment on an RTX 4090 D took 418.48 seconds for one backbone on the frozen 893-residue target at 50 steps. The same card took 645.96 seconds with the pinned original and 507.31 seconds with P4. The normalized Quiver matched the original. These are single observations. Use a same-card comparison for a different checkpoint, input, or GPU.
+
+## Full-length acceleration
+
+Build the native libraries once in the pinned Linux environment. The build requires a CUDA toolkit with SM89 support, `cublasLt.h`, and a C++17 compiler. The runtime uses the lockfile's `nvidia-cublas-cu11==11.11.3.6`. The benchmark used CUDA 12.8 development headers with cuBLASLt `111103` at runtime.
+
+```bash
+python uplifting/build_exact.py
+```
+
+Pass `--cuda-home` for a separate toolkit, `--cuda-include` for a separate development header directory, or `--cublas-lib` for the pinned `libcublasLt.so.11` in a staged environment. `--out` on the build command chooses a custom build directory.
+
+Add `--long-exact` to the example launcher command and use a fresh `--out` directory. If you set a custom build directory, pass it to the launcher with `--native-dir`. Long-exact enables the FP32 SE(3), LayerNorm, axial Q/K, residual, and Linear optimizations and includes Cα RBF reuse. `--se3-exact` selects the earlier SE(3) path and is a separate launcher mode.
+
+The native stack targets RTX 4090 and 4090 D. Linear dispatch checks the pinned cuBLASLt version and selected algorithm signatures. Unlisted shapes and unavailable algorithms use the original FP32 operation. The `long_exact` field in `summary.json` records kernel and fallback counters. `--audit-exact` also compares raw FP32 bytes on the first use of each dispatched Linear or Linear/ReLU shape.
+
+On the full 893-residue antigen, the original took 646.66 seconds and long-exact took 316.00 seconds for one 50-step backbone on the same RTX 4090 D. The normalized Quiver was byte-identical. A separate short-input check matched all 50 internal sampling steps and RNG states. [Full-length benchmark summary](benchmarks/long-exact-summary.json)
 
 The `baseline/upstream` branch points to the pristine upstream commit. The `opt/exact` branch contains the source changes and this launcher. The [P4 benchmark summary](benchmarks/p4-summary.json) records input sizes, wall times, and the scope of the comparison. Use `python uplifting/compare_exact.py --help` to compare artifacts after running both versions on the same GPU with the same inputs and settings.

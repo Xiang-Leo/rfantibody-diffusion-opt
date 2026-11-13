@@ -1,0 +1,14 @@
+{
+  "torch": "2.3.1+cu118",
+  "cublaslt": 111103,
+  "workspace_bytes": 33554432,
+  "choices": [
+    {"shape": [157609, 128, 128], "bias": true, "relu": false, "layout": "nn", "algorithm": [1, 20, 18, 28, 0]},
+    {"shape": [157609, 128, 256], "bias": true, "relu": true, "layout": "nn", "algorithm": [3, 20, 24, 26, 0]},
+    {"shape": [157609, 256, 128], "bias": true, "relu": false, "layout": "nn", "algorithm": [1, 20, 18, 28, 0]},
+    {"shape": [1263376, 128, 128], "bias": true, "relu": false, "layout": "nn", "algorithm": [1, 20, 18, 28, 0]},
+    {"shape": [1263376, 128, 32], "bias": true, "relu": false, "layout": "torch-packed", "algorithm": null},
+    {"shape": [1263376, 128, 256], "bias": true, "relu": true, "layout": "nn", "algorithm": [3, 20, 24, 26, 0]},
+    {"shape": [1263376, 256, 128], "bias": true, "relu": false, "layout": "nn", "algorithm": [3, 20, 20, 26, 0]}
+  ]
+}

@@ -23,6 +23,7 @@ scratch
 # Local inference runtime and outputs
 .venv/
 triton-cache/
+uplifting/native-build/
 runs/
 local-data/
 *.pt

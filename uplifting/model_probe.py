@@ -119,6 +119,12 @@ def main():
             from rf2_batch_rng import install
             plugin_counts["rf2_batch"] = install(torch)
     else:
+        long_exact = os.environ.get("NABLOOP_RFD_LONG_EXACT")
+        if long_exact:
+            from long_exact.runtime import install
+
+            plugin_counts["rfd_linear_exact"] = install(torch, long_exact,
+                                                       audit=os.environ.get("NABLOOP_RFD_LONG_EXACT_AUDIT") == "1")
         axial = os.environ.get("NABLOOP_RFD_AXIAL")
         if axial:
             from rfd_axial import install

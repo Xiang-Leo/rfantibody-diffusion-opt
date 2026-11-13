@@ -1,0 +1,19 @@
+{
+  "source_commit": "3e5a5bb1cb98befde9fc049ae3ff58cabb491f67",
+  "gpu": "NVIDIA GeForce RTX 4090 D",
+  "precision": "FP32",
+  "tf32": false,
+  "torch": "2.3.1+cu118",
+  "dgl": "2.4.0+cu118",
+  "triton": "2.3.1",
+  "cublaslt": 111103,
+  "full_antigen_residues": 893,
+  "pair_length": 1124,
+  "designs_per_run": 1,
+  "diffusion_steps": 50,
+  "full_length_pairs": [
+    {"stock_seconds": 645.96, "long_exact_seconds": 315.34, "normalized_quiver_byte_equal": true},
+    {"stock_seconds": 646.66, "long_exact_seconds": 316.00, "normalized_quiver_byte_equal": true}
+  ],
+  "short_trace": {"pair_length": 397, "diffusion_steps": 50, "internal_tensors_byte_equal": true, "rng_equal": true}
+}

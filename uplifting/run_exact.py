@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Generate antibody backbones with the RFdiffusion P4 exact configuration."""
+"""Generate antibody backbones with deterministic RFdiffusion FP32 inference."""
 
 import argparse
 from importlib.metadata import PackageNotFoundError, version
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -65,22 +66,32 @@ def main():
     parser.add_argument("--target", required=True, type=input_file, help="full antigen PDB")
     parser.add_argument("--framework", required=True, type=input_file, help="CDR-annotated antibody framework PDB")
     parser.add_argument("--loops", required=True, help="design loops and lengths, e.g. H3:7,L3:9")
-    parser.add_argument("--hotspots", required=True, help="target PDB chain and residue IDs, e.g. T305,T456")
+    parser.add_argument("--hotspots", default="", help="target PDB chain and residue IDs, e.g. T305,T456")
     parser.add_argument("--weights", required=True, type=input_file, help="external RFdiffusion_Ab.pt checkpoint")
     parser.add_argument("--out", required=True, type=Path, help="fresh output directory")
+    parser.add_argument("--output-prefix", default="backbone", help="Quiver tag prefix, default backbone")
     parser.add_argument("--designs", default=1, type=int, help="number of backbones, default 1")
     parser.add_argument("--seed", default=0, type=int, help="seed of first backbone, default 0")
     parser.add_argument("--gpu", help="CUDA device index or UUID, default respects CUDA_VISIBLE_DEVICES")
     parser.add_argument("--schedule-dir", type=Path, help="trusted directory containing the 50-step table and cached_schedules")
     parser.add_argument("--triton-cache", type=Path, help="reusable Triton cache directory, default under --out")
-    parser.add_argument("--se3-exact", action="store_true", help="use the experimental FP32 SE(3) node and basis kernels")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--se3-exact", action="store_true", help="use the FP32 SE(3) node and basis kernels")
+    modes.add_argument("--long-exact", "--linear-exact", action="store_true",
+                       help="enable the native FP32 kernels and screened Linear dispatch on RTX 4090/4090 D")
+    parser.add_argument("--native-dir", type=Path, help="long-exact libraries from uplifting/build_exact.py")
+    parser.add_argument("--audit-exact", action="store_true", help="compare the first use of each dispatched Linear shape")
     parser.add_argument("--reuse-ca-rbf", action="store_true", help="reuse the FP32 C-alpha distance features within a block")
     args = parser.parse_args()
 
     if args.designs < 1 or not 0 <= args.seed <= args.seed + args.designs - 1 < 2**32:
         parser.error("designs must be positive and all per-design seeds must be unsigned 32-bit integers")
-    if not args.loops.strip() or not args.hotspots.strip():
-        parser.error("supply the design loops and hotspot residue IDs")
+    if not args.loops.strip():
+        parser.error("supply the design loops")
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", args.output_prefix):
+        parser.error("choose a simple output prefix made of letters, numbers, underscores, dots and hyphens")
+    if (args.native_dir is not None or args.audit_exact) and not args.long_exact:
+        parser.error("--native-dir and --audit-exact require --long-exact")
     out = args.out.expanduser().resolve()
     if out.exists():
         parser.error(f"choose a fresh output directory: {out}")
@@ -100,6 +111,14 @@ def main():
     schedule_dir = args.schedule_dir.expanduser().resolve() if args.schedule_dir else None
     if schedule_dir and not ((schedule_dir / SCHEDULE).is_file() and (schedule_dir / "cached_schedules").is_dir()):
         parser.error(f"--schedule-dir must contain {SCHEDULE} and cached_schedules/")
+    native = None
+    if args.long_exact:
+        from long_exact.runtime import native_directory
+
+        try:
+            native = native_directory(args.native_dir or PLUGINS / "native-build")
+        except ValueError as error:
+            parser.error(str(error))
 
     os.umask(0o077)
     out.mkdir(parents=True)
@@ -120,8 +139,14 @@ def main():
     flags = FLAGS.copy()
     if args.se3_exact:
         flags["NABLOOP_RFD_SE3_EXACT"] = "1"
-    if args.reuse_ca_rbf:
+    if args.reuse_ca_rbf or args.long_exact:
         flags["NABLOOP_RFD_LEVERS"] += ",ca-rbf"
+    if args.long_exact:
+        flags["NABLOOP_RFD_LONG_EXACT"] = str(native)
+        if args.audit_exact:
+            flags["NABLOOP_RFD_LONG_EXACT_AUDIT"] = "1"
+        env.pop("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", None)
+        env.pop("NVIDIA_TF32_OVERRIDE", None)
     env.update(flags)
     env.update(
         PYTHONPATH=os.pathsep.join(pythonpath), PYTHONUNBUFFERED="1", PYTHONDONTWRITEBYTECODE="1",
@@ -141,12 +166,12 @@ def main():
         "--precision", "stock", "--", "--config-name", "antibody",
         hydra_path("antibody.target_pdb", args.target),
         hydra_path("antibody.framework_pdb", args.framework),
-        f"antibody.design_loops=[{args.loops}]", f"ppi.hotspot_res=[{args.hotspots}]",
+        f"antibody.design_loops=[{args.loops}]", f"ppi.hotspot_res=[{args.hotspots.strip()}]",
         hydra_path("inference.ckpt_override_path", args.weights),
         hydra_path("inference.quiver", result), f"inference.num_designs={args.designs}",
         "diffuser.T=50", "inference.final_step=1", "inference.deterministic=True",
         "inference.write_trajectory=False", f"inference.design_startnum={args.seed}",
-        "inference.output_prefix=backbone", hydra_path("hydra.run.dir", out / "hydra"),
+        hydra_path("inference.output_prefix", args.output_prefix), hydra_path("hydra.run.dir", out / "hydra"),
     ]
     print(f"RFdiffusion log: {log}", flush=True)
     started = time.perf_counter()
@@ -159,10 +184,13 @@ def main():
         completion = verify_run(metadata, result, entry, args.designs)
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         parser.exit(1, f"RFdiffusion output verification failed ({error}). See {log}\n")
-    (out / "summary.json").write_text(json.dumps({
+    summary = {
         "flags": flags, "argv": command, "cuda_visible_devices": env.get("CUDA_VISIBLE_DEVICES"),
         "wall_seconds": wall, "designs": args.designs, "metadata": completion,
-    }, indent=2) + "\n")
+    }
+    if args.long_exact:
+        summary["long_exact"] = completion["plugin_calls"]["rfd_linear_exact"]
+    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"Generated {args.designs} backbone(s) in {wall:.2f}s. Output: {result}")
 
 
